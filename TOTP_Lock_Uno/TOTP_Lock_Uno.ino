@@ -22,7 +22,7 @@ FIXED:
 
 
 CIRCUIT (Arduino Uno):
-keypad connected as below (currently for the blue keypads I purchased, not the one integrated in the safe door)
+keypad connected as below (currently for the blue keypads pictured, not the one integrated in the safe door I am hacking)
 arduino pin 3 to mosfet gate (G)
 arduino pin 4 to red LED +ve side
 arduino pin 5 to yellow LED +ve side

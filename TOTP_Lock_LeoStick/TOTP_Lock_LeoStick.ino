@@ -9,35 +9,57 @@ FIXED:
 /  Todo:
 - investigate what happens if currentMillis() rolls over (pretty sure nothing because it is unsigned)
 - introduce watchdog timer to save battery
-- introduce a way to change the shared key
+- introduce a way to change the shared key [James working on this]
 - give a longer time for the code to work (increase the totp period)
 - currently reading the RTC time twice during codeChecker - once inside printTheTime() and once in codeChecker().
   Two reads in quick succession like this may be contributing to clock drift... maybe fix so only required once?
+  Actually I think printTheTime() won't be needed in the production version so it is a moot point...
 - one-time use code (don't allow repeat-use?)
-- read and check the previous three codes as well as the current one, OR...
+- read and check the previous and next codes as well as the current one, [James has done this in Uno version] OR...
 - ...take into account clock-drift by auto-resetting the clock if a pattern is detected.
 - ... only after I find a way to ensure One Time use of the codes though.
 - QR codes can have longer periods - https://code.google.com/p/google-authenticator/wiki/KeyUriFormat
 - QR code generator (use free text option) - https://www.the-qrcode-generator.com/
 
 
-CIRCUIT:
-keypad connected to Leostick pins D4 to D8, D10 and D12 as below (currently for the blue keypads I purchased, not the one integrated in the safe door)
-LeoStick pin D9 to mosfet gate (G)
-LeoStick pin D0 to red LED +ve side
-LeoStick pin D1 to yellow LED +ve side
-LeoStick pin D9 to green LED +ve side
-LeoStick pin D2 to DS3231 module pin "D" - D2 is the I2C SDA pin for LeoStick
-LeoStick pin D3 to DS3231 module pin "C" - D3 is the I2C SCL pin for LeoStick
-DS3231 module pin "+" to arduino 5v
-DS3231 module pin "-" to arduino gnd
-red LED -ve to 330ohm resister and ground
-yellow LED -ve to 330ohm resistor and ground
-green LED -ve side to 330ohm resistor and ground
-
-
-(to continue)
-
+CIRCUIT description: (note descriptions will double up as I describe each piece of hardware)
+Keypad connected to Leostick pins D4 to D8, D10 and D12 as desribed below 
+  (currently for the blue keypads I purchased, not the one integrated in the safe door)
+LeoStick:
+  - pin D9 to mosfet gate (G) AND green LED +ve side          
+  - pin D0 to red LED +ve side                                
+  - pin D1 to yellow LED +ve side                             
+  - pin D2 to DS3231 module pin "D" (D2 is the I2C SDA pin for LeoStick)  
+  - pin D3 to DS3231 module pin "C" (D3 is the I2C SCL pin for LeoStick)  
+  - 5v+ to DS3231 module "+" pin                              
+  - GND connects to:
+    - DS3231 module pin "-"                                   
+    - 330ohm resistor for Green LED (-ve side)                
+    - 330ohm resistor for Yellow LED (-ve side)               
+    - 330ohm resistor for Red LED (-ve side)                  
+    - Mosfet source (S)                                       
+    - 6V Battery Pack -ve
+DS3231 module 
+  - pin "+" to arduino 5v                                     
+  - pin "D" to LeoStick pin D2 (D2 is the I2C SDA pin for LeoStick)   
+  - pin "C" to LeoStick pin D3 (D3 is the I2C SCL pin for LeoStick)   
+  - pin "-" to arduino GND                                    
+Red LED 
+  - -ve to 330ohm resister then gnd                           
+  - +ve to LeoStick pin D0                                    
+Yellow LED
+  - -ve to 330ohm resistor then gnd                           
+  - +ve to LeoStick pin D1                                    
+Green LED
+  - -ve to 330ohm resistor then gnd                           
+  - +ve to LeoStick pin D9 and Mosfet Gate (G)                
+Mosfet 
+  - Gate (G) to LeoStick pin D9 and Green LED +ve side        
+  - Drain (D) to diode (non-band side) and solenoid -ve       
+  - Source (S) to GND                                         
+Solenoid 
+  - +ve diode (band side) and to 6v battery pack +ve          
+  - -ve to diode (non-band side) AND mosfet drain (D)         
 
 
 */
@@ -49,7 +71,7 @@ green LED -ve side to 330ohm resistor and ground
 #include <DS3232RTC.h>
 #include <Time.h> 
 
-#include <Wire.h> 
+#include <Wire.h> //for communicating with Serial. To be removed in production version.
 
 #include <sha1.h>
 #include <TOTP.h>
@@ -108,21 +130,29 @@ TOTP totp = TOTP(hmacKey, 10);      // note that "MyLegoDoor" has 10 characters.
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("Starting Prototype_12-2-2015.ino");
+  Serial.println("Starting TOTP_Lock_LeoStick.ino");
   Wire.begin();
 
-//this section first sets the system time (maintained by the Time library) to
-//a hard-coded date and time, and then sets the RTC from the system time.
+/*  These two lines, if un-commented, first set the system time (maintained by the Time library) to
+ *  a hard-coded date and time, and then sets the RTC from the system time. This only needs to be
+ *  done if the RTC is new, or has become too far out of sync.
+ *  I use it by un-commenting, setting the setTime to a few minutes in the future (remember must be in GMT),
+ *  loading the sketch onto the arduino, then with the RTC connected, waiting and watching the clock until 
+ *  you press the "reset" button right when the hard-coded time becomes real. Now the RTC has been set, you should
+ *  disconnect it, comment out these lines again and re-load the sketch onto the arduino to prefent it re-writing 
+ *  that time every time the arduino starts...
+*/
 //the setTime() function is part of the Time library.
-//setTime(04, 45, 00, 07, 2, 2016);   //set the system time to 04h45m00s on 07Feb2016
+//setTime(10, 05, 00, 26, 4, 2016);   //set the system time to a few minutes from now (rememnber to use GMT). Format is (HH, MM, SS, DD, MM, YYYY)
 //RTC.set(now());                     //set the RTC from the system time
 
     setSyncProvider(RTC.get);   // the function to get the time from the RTC
     if(timeStatus() != timeSet) 
         Serial.println("Unable to sync with the RTC");
-    else
-        Serial.println("RTC has set the system time");      
-  
+    else {
+        Serial.println("RTC is giving a time signal. Current time is ");
+        printTheTime(); 
+    }
   pinMode(ledPinY, OUTPUT);
   digitalWrite(ledPinY, LOW);        // sets initial value
   pinMode(ledPinR, OUTPUT);
@@ -163,10 +193,11 @@ void printTheTime() {      // Prints the current time.
   Serial.print(':');
   Serial.print(minute(), DEC);
   Serial.print(':');
-  Serial.println(second(), DEC);
-  Serial.print("UNIX time = ");
+  Serial.print(second(), DEC);
+  Serial.print(" (UNIX time = ");
   //Serial.println(unixtime());
-  Serial.println(now());
+  Serial.print(now());
+  Serial.println(')');
 }
 
 //========================================

@@ -16,3 +16,23 @@ So off I went to Bunnings to purchase a cheap digital safe that I could hack. I 
 
 References: http://www.lucadentella.it/en/totp-libreria-per-arduino/
 Generate a new code: http://www.lucadentella.it/OTP
+
+
+Recent Changes (not shown in git history)
+FIXED:
+- got it working with the DS3231 Clock Module
+- cleaned up setup() and loop() sections, moving a lot of stuff into functions.
+- don't allow key presses while the 2second blink is active or the solenoid is open.
+- reset keyboard buffer 4 seconds after last key pressed.
+- move Uno and Nano code together using #defines (thanks Daniel!)
+
+/  Todo:
+- investigate what happens if currentMillis() rolls over (pretty sure nothing because it is unsigned)
+- introduce watchdog to reset the arduino if it doesn't respond in a certain time.
+- introduce a way to change the shared key
+- one-time use code (don't allow repeat-use?)
+- ...take into account clock-drift by auto-resetting the clock if a pattern is detected.
+- QR codes can have longer periods - https://github.com/google/google-authenticator/wiki/Key-Uri-Format
+- QR code generator (use free text option) - https://www.the-qrcode-generator.com/
+
+

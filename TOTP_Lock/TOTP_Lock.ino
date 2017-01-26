@@ -1,41 +1,44 @@
-/* Continuation of prototype version 1.4 - introducing Watchdog via Jeelib library, trying to get it working...
 
-FIXED:
-- got it working with the DS3231 Clock Module
-- cleaned up setup() and loop() sections, moving a lot of stuff into functions.
-- don't allow key presses while the 2second blink is active or the solenoid is open.
-- reset keyboard buffer 4 seconds after last key pressed.
+/* 
 
-/  Todo:
-- investigate what happens if currentMillis() rolls over (pretty sure nothing because it is unsigned)
-- introduce watchdog timer to save battery
-- introduce a way to change the shared key
-- give a longer time for the code to work (increase the totp period)
-- currently reading the RTC time twice during codeChecker - once inside printTheTime() and once in codeChecker().
-  Two reads in quick succession like this may be contributing to clock drift... maybe fix so only required once?
-- one-time use code (don't allow repeat-use?)
-- read and check the previous three codes as well as the current one, OR...
-- ...take into account clock-drift by auto-resetting the clock if a pattern is detected.
-- ... only after I find a way to ensure One Time use of the codes though.
-- QR codes can have longer periods - https://code.google.com/p/google-authenticator/wiki/KeyUriFormat
-- QR code generator (use free text option) - https://www.the-qrcode-generator.com/
-
-
-CIRCUIT (Arduino Uno):
-keypad connected as below (currently for the blue keypads pictured, not the one integrated in the safe door I am hacking)
-arduino pin 3 to mosfet gate (G)
-arduino pin 4 to red LED +ve side
-arduino pin 5 to yellow LED +ve side
-arduino pin A4 to DS3231 module pin "D"
-arduino pin A5 to DS3231 module pin "C"
-DS3231 module pin "+" to arduino 5v
-DS3231 module pin "-" to arduino gnd
-red LED -ve to 330ohhm resister
-
-(to continue)
-
-
-
+CIRCUIT description: (note descriptions will double up as I describe each piece of hardware)
+Keypad connected to Arduino pins as described below
+  (currently for the blue keypads I purchased, not the one integrated in the safe door)
+Arduino:
+  - [LeoStick D9 | Uno 3] to mosfet gate (G) AND green LED +ve side          
+  - [LeoStick D0 | Uno 4] to red LED +ve side                                
+  - [LeoStick D1 | Uno 5] to yellow LED +ve side                             
+  - [LeoStick D2 | Uno A4] to DS3231 module pin "D" (D2 is the I2C SDA pin for LeoStick, or A4 for Uno)  
+  - [LeoStick D3 | Uno A5] to DS3231 module pin "C" (D3 is the I2C SCL pin for LeoStick, or A5 for Uno)  
+  - 5v+ to DS3231 module "+" pin                              
+  - GND connects to:
+    - DS3231 module pin "-"                                   
+    - 330ohm resistor for Green LED (-ve side)                
+    - 330ohm resistor for Yellow LED (-ve side)               
+    - 330ohm resistor for Red LED (-ve side)                  
+    - Mosfet source (S)                                       
+    - 6V Battery Pack -ve
+DS3231 module 
+  - pin "+" to arduino 5v                                     
+  - pin "D" to [LeoStick D2 | Uno A4] (D2 is the I2C SDA pin for LeoStick, or A4 for Uno)   
+  - pin "C" to [LeoStick D3 | Uno A5] (D3 is the I2C SCL pin for LeoStick, or A5 for Uno)   
+  - pin "-" to arduino GND                                    
+Red LED 
+  - -ve to 330ohm resister then gnd                           
+  - +ve to [LeoStick D0 | Uno 4]                                  
+Yellow LED
+  - -ve to 330ohm resistor then gnd                           
+  - +ve to [LeoStick D1 | Uno 5]                                  
+Green LED
+  - -ve to 330ohm resistor then gnd                           
+  - +ve to [LeoStick D9 | Uno 3] and Mosfet Gate (G)                
+Mosfet 
+  - Gate (G) to [LeoStick D9 | Uno 3] and Green LED +ve side        
+  - Drain (D) to diode (non-band side) and solenoid -ve       
+  - Source (S) to GND                                         
+Solenoid 
+  - +ve diode (band side) and to 6v battery pack +ve          
+  - -ve to diode (non-band side) AND mosfet drain (D)         
 
 */
 
@@ -45,15 +48,23 @@ red LED -ve to 330ohhm resister
 
 #include <DS3232RTC.h>
 #include <Time.h> 
+#include <TimeLib.h>
 
-#include <Wire.h> 
+#include <Wire.h> //for communicating with Serial. To be removed in production version.
 
 #include <sha1.h>
 #include <TOTP.h>
-
+#include <string.h>
 //#include <JeeLib.h> // Low power functions library
 
 //ISR(WDT_vect) { Sleepy::watchdogEvent(); } // Initialize the watchdog
+
+//--ARE YOU USING NANO OR UNO? UNCOMMENT ONE-----
+//===============================================
+  //#define ARDUINO_NANO 
+  #define ARDUINO_UNO
+//===============================================
+
 
 // --CONSTANTS------------------
 // ----KEYBOARD
@@ -65,10 +76,16 @@ char keys[ROWS][COLS] = {
 	{'7','8','9'},
 	{'*','0','#'}
 	};
-byte rowPins[ROWS] = {9,8,7,6}; //connect to the row pinouts of the keypad
-                                //(pin 9 to the outside of the 4 slots in the pad)
-byte colPins[COLS] = {10,11,12}; //connect to the column pinouts of the keypad 
-                                 //(pin 12 to the outside of the 3 slots in the pad)
+#if defined(ARDUINO_UNO)
+byte rowPins[ROWS] = {9,8,7,6}; //(pin 9 to the outside of the 4 slots in the pad)
+byte colPins[COLS] = {10,11,12}; //(pin 12 to the outside of the 3 slots in the pad)
+#elif defined (ARDUINO_NANO)
+byte rowPins[ROWS] = {4,5,6,7}; //(pin 4 to the outside of the 4 slots in the pad)
+byte colPins[COLS] = {8,10,12}; //(pin 12 to the outside of the 3 slots in the pad, then 10 and 8)
+#else
+#error
+#endif
+
 Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS );
 
 // ----TIME
@@ -77,13 +94,21 @@ long blinkInterval = 100;           // interval at which to blink (milliseconds)
 long blinkLength = 1000;            // length of the blink signal (in milliseconds). must be longer than blinkInterval, should be a multiple of it.
 long solenoidLength = 2000;         // length the solenoid remains open (in milliseconds)
 long delayBeforeReset = 4000;       // length of time after last keypress before inputbuffer will reset.
-uint8_t hmacKey[] = {0x4d, 0x79, 0x4c, 0x65, 0x67, 0x6f, 0x44, 0x6f, 0x6f, 0x72};  // shared secret is "MyLegoDoor" in HEX.
-// NB the uint8_t constant will be a variable later
+uint8_t hmacKey[] = {0x53, 0x32, 0x4b, 0x45, 0x4c, 0x51, 0x4c, 0x34, 0x5a, 0x59};  // shared secret is "S2KELQL4ZY" in HEX.
+// NB the uint8_t constant will be a variable later (once I write a way to change it without re-flashing the arduino)
 
-// ----OUTPUT PINS - for UNO
+// ----OUTPUT PINS
+#if defined (ARDUINO_UNO)
 byte ledPinY = 5;                   //Yellow LED
 byte ledPinR = 4;                   //Red LED
 byte solenoidPin = 3;
+#elif defined (ARDUINO_NANO)   //(or LeoStick)
+byte ledPinY = 1;                   //Yellow LED
+byte ledPinR = 0;                   //Red LED
+byte solenoidPin = 9;               //also the Green LED on the LeoStick
+#else
+#error
+#endif
 
 // --VARIABLES------------------
 boolean blink = false;              // whether or not ledPinR should blink at interval blinkInterval
@@ -95,30 +120,45 @@ unsigned long blinkStart = 0;       // will store the time that the LED started 
 unsigned long solenoidStart = 0;    // will store the time that the solenoid opened
 unsigned long lastKeyPress = 0;     // will store last time a key was pressed
 char key = 0;
-char* totpCode;                     // calculated TOPTP code
+char totpCode[6];                   // calculated TOPTP code
+char preTotpCode[6];
+char postTotpCode[6];
 char inputCode[7];                  // the code entered (zero indexed - so holds 8 data points in total)
 unsigned int inputCode_idx;         // counter for length of the input code
-TOTP totp = TOTP(hmacKey, 10);      // note that "MyLegoDoor" has 10 characters.
+TOTP totp = TOTP(hmacKey, 10);      // note that "S2KELQL4ZY" has 10 characters.
 
 
 //========================================
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("Starting Prototype_12-2-2015.ino");
+  Serial.println("Starting TOTP_Lock_Uno.ino");
   Wire.begin();
 
-//this section first sets the system time (maintained by the Time library) to
-//a hard-coded date and time, and then sets the RTC from the system time.
+
+/*  These lines, if un-commented, first set the system time (maintained by the Time library) to
+ *  a hard-coded date and time, and then sets the RTC from the system time. This only needs to be
+ *  done if the RTC is new, or has become too far out of sync.
+ *  I use it by un-commenting, setting the setTime to a few minutes in the future (remember must be in GMT),
+ *  loading the sketch onto the arduino, then with the RTC connected, waiting and watching the clock until 
+ *  you press the "reset" button right when the hard-coded time becomes real. Now the RTC has been set, you should
+ *  disconnect it, comment out these lines again and re-load the sketch onto the arduino to prefent it re-writing 
+ *  that time every time the arduino starts...
+*/
 //the setTime() function is part of the Time library.
-//setTime(04, 45, 00, 07, 2, 2016);   //set the system time to 04h45m00s on 07Feb2016
+//setTime(01, 52, 00, 26, 1, 2017);   //set the system time (HH, MM, SS, DD, MM, YYYY)
+//Serial.println("Arduino time has been set");
 //RTC.set(now());                     //set the RTC from the system time
+//Serial.println("Arduino has set the RTC time");
 
     setSyncProvider(RTC.get);   // the function to get the time from the RTC
     if(timeStatus() != timeSet) 
         Serial.println("Unable to sync with the RTC");
-    else
-        Serial.println("RTC has set the system time");      
+    else {
+      setTime(RTC.get());
+      Serial.print("RTC has set the arduino time to -");
+      printTheTime();
+    }
   
   pinMode(ledPinY, OUTPUT);
   digitalWrite(ledPinY, LOW);        // sets initial value
@@ -160,10 +200,10 @@ void printTheTime() {      // Prints the current time.
   Serial.print(':');
   Serial.print(minute(), DEC);
   Serial.print(':');
-  Serial.println(second(), DEC);
-  Serial.print("UNIX time = ");
-  //Serial.println(unixtime());
-  Serial.println(now());
+  Serial.print(second(), DEC);
+  Serial.print(" (UNIX time = ");
+  Serial.print(now());
+  Serial.println(')');
 }
 
 //========================================
@@ -256,11 +296,25 @@ void codeChecker() {
 
   //DateTime now = RTC.get();  // Read the current time and store it
   long GMT = RTC.get();
-  totpCode = totp.getCode(GMT);
-  Serial.print("TOTP code is: ");
-  Serial.println(totpCode);
+  long pre = GMT-30;
+  long post = GMT+30;
   
-  if(strcmp(inputCode, totpCode) == 0) {      // totp code is correct
+  //memcpy(totpCode,totp.getCode(GMT),6);
+  //memcpy(preTotpCode,totp.getCode(pre),6);
+  //memcpy(postTotpCode,totp.getCode(post),6);
+  
+  Serial.print("Current TOTP code is: ");
+  Serial.println(totp.getCode(GMT));
+  
+  Serial.print("Previous TOTP code is: ");
+  Serial.println(totp.getCode(pre));
+  Serial.print("Next TOTP code is: ");
+  Serial.println(totp.getCode(post));
+  
+  if(strcmp(inputCode, totp.getCode(GMT)) == 0  ||
+  strcmp(inputCode, totp.getCode(pre)) == 0 ||
+  strcmp(inputCode, totp.getCode(post)) == 0 )
+  {      // totp code is correct
     Serial.println("Code was correct! Solenoid opened");
     digitalWrite(solenoidPin,HIGH);
     solenoidStart = millis();
@@ -272,6 +326,10 @@ void codeChecker() {
     blinkStart = millis();
     blin2 = true;
   }
+
+  memset(totpCode,0,6);
+  memset(preTotpCode,0,6);
+  memset(postTotpCode,0,6); 
 }
 
 void kpDelayHandler() {  // monitor last time a key was pressed. Reset if too long ago.

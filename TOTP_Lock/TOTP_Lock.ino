@@ -149,8 +149,8 @@ boolean code_correct=false;         // verified got into change mode
 unsigned long change_mode_timer = 0; //time since change mode entered
 unsigned long watchDogTimer = 0;   // time since watchdog module was last updated
 boolean verified_change_mode=false;  //if user has successfully entered change mode.
-char inputKey[10];                  //new key entered
-unsigned int inputKey_idx;          // counter for length of new key.
+char inputSecret[10];                  //new Shared Secret entered
+unsigned int inputSecret_idx;          // counter for length of new Shared Secret.
 
 
 
@@ -205,8 +205,6 @@ void loop() {
     blinkHandler();
     solenoidHandler();
     changeModeTimer();
-    
-    //TODO need to add handler to reset change_mode after timeout.
 
     //TODO need to worry about LEDs for change_mode.
 
@@ -397,10 +395,10 @@ int codeChecker() {
 //=========================================
 
 void setNewKey() {
-  //new key is in an array (null terminated), inputKey.
+  //new key is in an array (null terminated), inputSecret.
 
   Serial.println("We're in the \"setNewKey\" function now.");
-  //totp = TOTP(hmacKey, 10);
+  //totp = TOTP((uint8_t*) inputSecret, 10);
 
   //can use web app to convert to 32-bit encoding for google authenticator. (provide link in instructions.)
 

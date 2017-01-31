@@ -102,15 +102,12 @@ byte colPins[COLS] = {8,10,12}; //(pin 12 to the outside of the 3 slots in the p
 Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS );
 
 // ----TIME
-const bool LOWPOWER = true;         // set to true to enable low-power sleeping
 long blinkInterval = 100;           // interval at which to blink (milliseconds)
 long blinkLength = 1000;            // length of the blink signal (in milliseconds). must be longer than blinkInterval, should be a multiple of it.
 long solenoidLength = 2000;         // length the solenoid remains open (in milliseconds)
 long delayBeforeReset = 4000;       // length of time after last keypress before inputbuffer will reset.
 long changeModeTimeOut=100000;      
 long watchDogTimeout = 120000;      // signal the watchdog timer every 2 minutes to prevent system reset.
-char hmacKey[10];      //empty var to store value read from EEPROM
-//char sharedSecret[11] = "S2KELQL4ZY";  //Why [11] and not [10]? - appears it needs the null terminator string...
 
 // ----OUTPUT PINS
 #if defined (ARDUINO_UNO)
@@ -130,27 +127,35 @@ byte watchDogPin = 13;              //also the Red LED on the LeoStick
 // --VARIABLES------------------
 boolean blink = false;              // whether or not ledPinR should blink at interval blinkInterval
 boolean keepBlinking = false;       // whether or not ledPinR should blink for time blinkLength
-boolean solenoidOpen = false;       // whether or not the solenoid should open (nb: the green LED is on the same circuit)
-unsigned long currentMillis = 0;    // will store last time LED was updated
-unsigned long previousMillis = 0;   // will store last time LED was updated
-unsigned long blinkStart = 0;       // will store the time that the LED started blinking
-unsigned long solenoidStart = 0;    // will store the time that the solenoid opened
-unsigned long lastKeyPress = 0;     // will store last time a key was pressed
-char key = 0;
+boolean solenoidOpen = false;       // whether or not the solenoid is open (nb: the green LED is on the same circuit)
+boolean openSolenoid = false;       // whether or not to open the solenoid now
+
+unsigned long currentMillis = 0;    // when LED was updated
+unsigned long previousMillis = 0;   // when LED was updated
+unsigned long blinkStart = 0;       // when the LED started blinking
+unsigned long solenoidStart = 0;    // when the solenoid opened
+unsigned long lastKeyPress = 0;     // when a key was last pressed
+unsigned long change_mode_timer = 0;// when change mode was entered
+unsigned long watchDogTimer = 0;    // when watchdog was last signalled
+
+char key = 0;                       // store key value from the keypad
+unsigned int inputCode_idx;         // counter for length of the input code
+char inputCode[7];                  // the code entered (zero indexed - so holds 8 data points in total)
 char totpCode[6];                   // calculated TOTP code
 char preTotpCode[6];
 char postTotpCode[6];
-char inputCode[7];                  // the code entered (zero indexed - so holds 8 data points in total)
-unsigned int eeAddress = 0;        // the current address in the EEPROM (i.e. which byte we're going to write to/read from next)
-unsigned int inputCode_idx;         // counter for length of the input code
+
+unsigned int eeAddress = 0;         // the current address in the EEPROM (i.e. which byte we're going to write to/read from next)
+char hmacKey[10];                   // empty var to store value read from EEPROM
+//char hardCodedKey[11] = "S2KELQL4ZY";  // Needs extra byte for null terminator.
 TOTP totp = TOTP((uint8_t*) hmacKey, 10);      // note that "S2KELQL4ZY" has 10 characters.
+
 boolean change_mode = false;        // if user has tried to get into change mode
-boolean code_correct=false;         // verified got into change mode
-unsigned long change_mode_timer = 0; //time since change mode entered
-unsigned long watchDogTimer = 0;   // time since watchdog module was last updated
-boolean verified_change_mode=false;  //if user has successfully entered change mode.
-char inputSecret[10];                  //new Shared Secret entered
-unsigned int inputSecret_idx;          // counter for length of new Shared Secret.
+boolean verified_change_mode=false; // if user has successfully entered change mode.
+char inputSharedKey[10];            // new Shared Key entered
+unsigned int inputSharedKey_idx;    // counter for length of new Shared Key.
+
+const bool LOWPOWER = true;         // set to true to enable low-power sleeping (Jeelib)
 
 
 
@@ -159,14 +164,17 @@ unsigned int inputSecret_idx;          // counter for length of new Shared Secre
 void setup() {
   Wire.begin();
   Serial.begin(9600);
+  #if defined (LEOSTICK)
+  while (!Serial) { ; }   //NOTE: script won't work until the serial montitor is opened with this line...
+  #endif
   Serial.println("Starting TOTP_Lock.ino");
 
-//setTime(10, 07, 00, 30, 1, 2017);   //set the system time (HH, MM, SS, DD, MM, YYYY)
+//setTime(04, 14, 00, 31, 1, 2017);   //set the system time (HH, MM, SS, DD, MM, YYYY)
 //Serial.println("Arduino time has been set");
 //RTC.set(now());                     //set the RTC from the system time
 //Serial.println("Arduino has set the RTC time");
 
-  setSyncProvider(RTC.get);   // the function to get the time from the RTC
+  setSyncProvider(RTC.get);   // get the time from the RTC
   if(timeStatus() != timeSet)
       Serial.println("Unable to sync with the RTC");
   else {
@@ -175,19 +183,24 @@ void setup() {
     printTheTime();
   }
 
-//  EEPROM.put(eeAddress, sharedSecret);
-//  Serial.print("EEPROM written with sharedSecret: ");
-//  Serial.println(sharedSecret);
+//  EEPROM.put(eeAddress, hardCodedKey);
+//  Serial.print("EEPROM written with hardCodedKey: ");
+//  Serial.println(hardCodedKey);
 
   EEPROM.get(eeAddress, hmacKey);  // pull the shared key value from EEPROM
+  Serial.print("Shared Key read from EEPROM is: ");
+  Serial.print(hmacKey);
+  Serial.print(" which is ");
+  Serial.print(strlen((const char*)hmacKey));
+  Serial.println(" chars long.");
 
   pinMode(ledPinY, OUTPUT);
-  digitalWrite(ledPinY, LOW);        // sets initial value
+  digitalWrite(ledPinY, LOW);
   pinMode(ledPinR, OUTPUT);
   digitalWrite(ledPinR, LOW);
   pinMode(solenoidPin, OUTPUT);
   digitalWrite(solenoidPin, LOW);    // should already be closed, but just in case
-  keypad.addEventListener(keypadEvent); //adds an event listener for this keypad
+  keypad.addEventListener(keypadEvent);
 }
 
 //========================================
@@ -200,11 +213,12 @@ void loop() {
     key = keypad.getKey();
     currentMillis = millis();
     
-    watchDogHandler();
+    
     kpDelayHandler();
     blinkHandler();
     solenoidHandler();
-    changeModeTimer();
+    changeModeHandler();
+    watchDogHandler();
 
     //TODO need to worry about LEDs for change_mode.
 
@@ -214,7 +228,6 @@ void loop() {
 //========================================
 
 void printTheTime() {      // Prints the current time.
-  //DateTime now = RTC.get(); //Read the current time and store it
   Serial.println();
   Serial.print(year(), DEC);
   Serial.print('/');
@@ -234,22 +247,26 @@ void printTheTime() {      // Prints the current time.
 
 //========================================
 
-void keypadEvent(KeypadEvent key){    // handler for the Keypad
+void keypadEvent(KeypadEvent key){
   switch (keypad.getState()){
     case PRESSED:
       lastKeyPress = millis();
       switch (key){
-        case '*':                 // reset code and blink for blinkLength ms.
+        case '*':                 // clear the input buffer, exit change mode
           Serial.println();
-          Serial.println("* pressed, resetting the input buffer...");
-          inputCode_idx = 0;
+          Serial.println("* pressed");
+          if (inputCode_idx > 0); {
+            Serial.println("Resetting the input buffer");
+            inputCode_idx = 0;
+          }
           blinkStart = millis();
           keepBlinking = true;
+          change_mode_timer = -changeModeTimeOut;
         break;
         case '#':
           digitalWrite(ledPinY,!digitalRead(ledPinY));
           Serial.println();
-          Serial.println("Change password mode, please enter the OTP to verify");
+          Serial.println("Change Shared Key mode, please enter the OTP to verify");
           change_mode=true;
           change_mode_timer=millis();
           break;
@@ -262,10 +279,10 @@ void keypadEvent(KeypadEvent key){    // handler for the Keypad
                 if (change_mode) {   //have verified Change Mode!
                   Serial.println("Change Mode Verified");
                   verified_change_mode=true;
-                  setNewKey();
+                  setNewSharedKey();
                 }
                 else {  // normal operation mode - go ahead and open the lock
-                  openSolenoid();
+                  openSolenoid = true;
                 }
               }
             }
@@ -307,10 +324,10 @@ char kpBuffer(char key, char len) {   //save key value in input buffer
 
 //========================================
 
-void kpDelayHandler() {  // monitor last time a key was pressed. Reset if too long ago.
+void kpDelayHandler() {  // reset input buffer after a delay.
   if (inputCode_idx > 0 && currentMillis - lastKeyPress > delayBeforeReset) {
     Serial.println();
-    Serial.println("too slow, resetting the input buffer...");
+    Serial.println("too slow, Resetting the input buffer...");
     inputCode_idx = 0;
     blinkStart = millis();
     keepBlinking = true;
@@ -320,11 +337,9 @@ void kpDelayHandler() {  // monitor last time a key was pressed. Reset if too lo
 //========================================
 
 void blinkHandler() {
-  if (blink){
-    if(currentMillis - previousMillis > blinkInterval) {
+  if (blink && currentMillis - previousMillis > blinkInterval) {
       previousMillis = currentMillis;
       digitalWrite(ledPinR,!digitalRead(ledPinR));
-    }
   }
   if (keepBlinking){
     blink = true;
@@ -339,23 +354,18 @@ void blinkHandler() {
 //========================================
 
 void solenoidHandler() {
-  if (solenoidOpen){
-    if(currentMillis - solenoidStart > solenoidLength) {
-      digitalWrite(solenoidPin,LOW);
-      solenoidOpen = false;
-      Serial.println("Solenoid closed");
-      Serial.println();
-    }
+  if (openSolenoid) {
+    Serial.println("Solenoid opened");
+    digitalWrite(solenoidPin,HIGH);
+    solenoidStart = millis();
+    openSolenoid = false;
+    solenoidOpen = true;
   }
-}
-
-//=========================================
-
-void openSolenoid() {
-  Serial.println("Solenoid opened");
-  digitalWrite(solenoidPin,HIGH);
-  solenoidStart = millis();
-  solenoidOpen = true;
+  if (digitalRead(solenoidPin) == HIGH && currentMillis - solenoidStart > solenoidLength) {
+      digitalWrite(solenoidPin,LOW);
+      Serial.println("Solenoid closed");
+      solenoidOpen = false;
+  }
 }
 
 //========================================
@@ -386,19 +396,18 @@ int codeChecker() {
     Serial.println("Wrong code entered");
     blinkStart = millis();
     keepBlinking = true;
-    change_mode=false;
-    verified_change_mode=false;
+    change_mode_timer = -changeModeTimeOut;
     return 0;
   }
 }
 
 //=========================================
 
-void setNewKey() {
-  //new key is in an array (null terminated), inputSecret.
+void setNewSharedKey() {
+  //new key is in an array (null terminated char), inputSharedKey.
 
-  Serial.println("We're in the \"setNewKey\" function now.");
-  //totp = TOTP((uint8_t*) inputSecret, 10);
+  Serial.println("We're in the \"setNewSharedKey\" function now.");
+  //totp = TOTP((uint8_t*) inputSharedKey, 10);
 
   //can use web app to convert to 32-bit encoding for google authenticator. (provide link in instructions.)
 
@@ -408,20 +417,18 @@ void setNewKey() {
 
 //=========================================
 
-void changeModeTimer() {
-  if (change_mode){
-    if(currentMillis - change_mode_timer > changeModeTimeOut) {
+void changeModeHandler() {
+  if (change_mode && currentMillis - change_mode_timer > changeModeTimeOut) {
       change_mode=false;
       verified_change_mode=false;
       Serial.println("Change mode deactivated");
       Serial.println();
-    }
   }
 }
 
 //=========================================
 
-void watchDogHandler() { //signals the WatchDog module
+void watchDogHandler() {  //signals the WatchDog module
   if(!inputCode_idx > 0 && currentMillis - watchDogTimer > watchDogTimeout) {
     digitalWrite(watchDogPin,HIGH);
     watchDogTimer = millis();
